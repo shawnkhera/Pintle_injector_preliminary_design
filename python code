@@ -1,0 +1,1181 @@
+# ================================================================
+# LOX / GCH4 PINTLE INJECTOR PRELIMINARY DESIGN
+#
+# DESIGN POINT:
+#       Maximum thrust = 3 kN
+#       Chamber pressure = 24 bar
+#       Mass flow = 1.17 kg/s
+#
+# Lower operating points:
+#       1 kN
+#       2 kN
+#
+# NASA CEA is used for:
+#       C*
+#       Cf
+#       Isp
+#       gamma
+#       chamber temperature
+#
+# ================================================================
+
+import math
+import csv
+import numpy as np
+import cea
+
+
+# ================================================================
+# 1. ENGINE INPUTS
+# ================================================================
+
+F_MIN = 1000.0          # N
+F_MID = 2000.0          # N
+F_MAX = 3000.0          # N
+
+# ------------------------------------------------
+# KNOWN MAXIMUM-THRUST DESIGN POINT
+# ------------------------------------------------
+
+PC_DESIGN_BAR = 24.0    # bar
+MDOT_DESIGN = 1.17      # kg/s
+
+# O/F
+OF_DESIGN = 3.0
+
+# Sea-level pressure
+PA_BAR = 1.01325
+
+G0 = 9.80665
+
+
+# ================================================================
+# 2. PROPELLANT TEMPERATURES
+# ================================================================
+
+T_LOX = 90.0            # K
+T_CH4 = 111.0           # K
+
+
+# ================================================================
+# 3. INJECTOR INPUTS
+# ================================================================
+
+# Injector pressure drop fraction
+
+DP_LOX_FRACTION = 0.20
+DP_CH4_FRACTION = 0.20
+
+# Discharge coefficients
+
+CD_LOX = 0.75
+CD_CH4 = 0.75
+
+
+# ================================================================
+# 4. PRELIMINARY GCH4 PROPERTIES
+# ================================================================
+#
+# IMPORTANT:
+# These are preliminary values.
+# For final design use real-fluid properties at the actual
+# injector inlet pressure and temperature.
+# ================================================================
+
+RHO_CH4 = 8.0            # kg/m^3
+A_CH4 = 450.0             # m/s
+MU_CH4 = 1.1e-5           # Pa.s
+
+RHO_LOX = 1141.0          # kg/m^3
+MU_LOX = 1.9e-4           # Pa.s
+
+
+# ================================================================
+# 5. PINTLE GEOMETRY INPUTS
+# ================================================================
+
+# Initial pintle diameter
+
+PINTLE_DIAMETER_MM = 10.0
+
+# Pintle tip angle
+#
+# This is NOT the spray angle.
+
+PINTLE_ANGLE_DEG = 30.0
+
+# Number of slots
+
+N_SLOTS = 24
+
+# Blockage factor
+
+BLOCKAGE_FACTOR = 0.50
+
+
+# ================================================================
+# 6. K-VALUE INPUTS
+# ================================================================
+
+V_GAS_TRACE = 100.0       # m/s
+T_ANN_TRACE = 0.001       # m
+
+V_LIQ_TRACE = 10.0        # m/s
+L_OPEN_TRACE = 0.005      # m
+
+RHO_GAS_TRACE = 1.225
+RHO_AIR_ATM = 1.225
+
+RHO_LIQ_TRACE = 1000.0
+RHO_WATER = 1000.0
+
+MR_COLD_FLOW = 1.0
+
+RE_LIQ_TRACE = 10000.0
+RE_GAS_TRACE = 20000.0
+
+
+# Select K method
+
+K_METHOD = "K1"
+
+
+# ================================================================
+# 7. TRACING OPENING PARAMETERS
+# ================================================================
+
+T_TAG = 1.0
+
+R_GAS_TRACE = 518.3
+
+T_GAS_TRACE = 300.0
+
+MU_LIQ_TRACE = 1.0e-3
+
+MU_GAS_TRACE = 1.1e-5
+
+T_TRACE = 1.0
+
+
+# ================================================================
+# 8. NASA CEA INITIALIZATION
+# ================================================================
+
+REACTANT_NAMES = [
+    "CH4(L)",
+    "O2(L)"
+]
+
+reac = cea.Mixture(REACTANT_NAMES)
+
+prod = cea.Mixture(
+    REACTANT_NAMES,
+    products_from_reactants=True
+)
+
+solver = cea.RocketSolver(
+    prod,
+    reactants=reac
+)
+
+solution = cea.RocketSolution(solver)
+
+fuel_weights = np.array([
+    1.0,
+    0.0
+])
+
+oxidizer_weights = np.array([
+    0.0,
+    1.0
+])
+
+
+# ================================================================
+# 9. NASA CEA FUNCTION
+# ================================================================
+
+def run_cea(pc_bar, of_ratio, expansion_ratio):
+
+    T_reactants = np.array([
+        T_CH4,
+        T_LOX
+    ])
+
+    weights = reac.of_ratio_to_weights(
+        oxidizer_weights,
+        fuel_weights,
+        of_ratio
+    )
+
+    hc = reac.calc_property(
+        cea.ENTHALPY,
+        weights,
+        T_reactants
+    ) / cea.R
+
+    pi_p = [pc_bar / PA_BAR]
+
+    solver.solve(
+        solution,
+        weights,
+        float(pc_bar),
+        pi_p,
+        supar=[expansion_ratio],
+        iac=True,
+        hc=hc
+    )
+
+    Mach = np.asarray(solution.Mach)
+
+    # Find final supersonic station
+
+    supersonic_indices = np.where(
+        Mach > 1.0
+    )[0]
+
+    if len(supersonic_indices) == 0:
+
+        raise RuntimeError(
+            "CEA did not return a supersonic station."
+        )
+
+    exit_index = supersonic_indices[-1]
+
+    Cstar = float(
+        solution.c_star[exit_index]
+    )
+
+    Cf = float(
+        solution.coefficient_of_thrust[exit_index]
+    )
+
+    Isp_ms = float(
+        solution.Isp[exit_index]
+    )
+
+    Isp = Isp_ms / G0
+
+    gamma = float(
+        solution.gamma_s[exit_index]
+    )
+
+    Tc = float(
+        solution.T[0]
+    )
+
+    return {
+        "Cstar": Cstar,
+        "Cf": Cf,
+        "Isp": Isp,
+        "gamma": gamma,
+        "Tc": Tc
+    }
+
+
+# ================================================================
+# 10. CALCULATE IDEAL SEA-LEVEL EXPANSION RATIO
+# ================================================================
+
+# First run CEA using a temporary expansion ratio
+
+initial_cea = run_cea(
+    PC_DESIGN_BAR,
+    OF_DESIGN,
+    5.0
+)
+
+gamma = initial_cea["gamma"]
+
+Pe_Pc = PA_BAR / PC_DESIGN_BAR
+
+EXPANSION_RATIO = (
+    1.0
+    /
+    (
+        math.sqrt(
+            2.0 * gamma /
+            (gamma - 1.0)
+        )
+        *
+        Pe_Pc ** (
+            1.0 / gamma
+        )
+        *
+        math.sqrt(
+            1.0
+            -
+            Pe_Pc ** (
+                (gamma - 1.0) / gamma
+            )
+        )
+    )
+)
+
+
+print("\n================================================")
+print("NOZZLE EXPANSION")
+print("================================================")
+
+print(
+    f"gamma               = {gamma:.5f}"
+)
+
+print(
+    f"Ideal sea-level Ae/At = "
+    f"{EXPANSION_RATIO:.4f}"
+)
+
+
+# ================================================================
+# 11. CEA AT THE ACTUAL 3-kN DESIGN POINT
+# ================================================================
+
+cea_design = run_cea(
+    PC_DESIGN_BAR,
+    OF_DESIGN,
+    EXPANSION_RATIO
+)
+
+Cstar_design = cea_design["Cstar"]
+Cf_design = cea_design["Cf"]
+Isp_design = cea_design["Isp"]
+
+
+print("\n================================================")
+print("3 kN DESIGN POINT")
+print("================================================")
+
+print(
+    f"Thrust              = {F_MAX:.2f} N"
+)
+
+print(
+    f"Chamber pressure    = "
+    f"{PC_DESIGN_BAR:.2f} bar"
+)
+
+print(
+    f"Specified mdot      = "
+    f"{MDOT_DESIGN:.5f} kg/s"
+)
+
+print(
+    f"CEA C*              = "
+    f"{Cstar_design:.2f} m/s"
+)
+
+print(
+    f"CEA Cf              = "
+    f"{Cf_design:.5f}"
+)
+
+print(
+    f"CEA Isp             = "
+    f"{Isp_design:.2f} s"
+)
+
+print(
+    f"CEA Tc              = "
+    f"{cea_design['Tc']:.1f} K"
+)
+
+
+# ================================================================
+# 12. CHECK THE SPECIFIED 3-kN MASS FLOW
+# ================================================================
+
+# C* relation:
+#
+# Pc = mdot*C*/At
+#
+# Therefore:
+#
+# At = mdot*C*/Pc
+
+Pc_design_Pa = (
+    PC_DESIGN_BAR * 1e5
+)
+
+At_from_Cstar = (
+    MDOT_DESIGN
+    *
+    Cstar_design
+    /
+    Pc_design_Pa
+)
+
+
+# Thrust relation:
+#
+# At = F/(Cf*Pc)
+
+At_from_thrust = (
+    F_MAX
+    /
+    (
+        Cf_design
+        *
+        Pc_design_Pa
+    )
+)
+
+
+print("\n================================================")
+print("THROAT AREA CHECK")
+print("================================================")
+
+print(
+    f"At from C*          = "
+    f"{At_from_Cstar:.8e} m^2"
+)
+
+print(
+    f"At from thrust      = "
+    f"{At_from_thrust:.8e} m^2"
+)
+
+difference = (
+    abs(
+        At_from_Cstar
+        -
+        At_from_thrust
+    )
+    /
+    At_from_thrust
+    *
+    100.0
+)
+
+print(
+    f"Difference           = "
+    f"{difference:.3f} %"
+)
+
+
+# ================================================================
+# 13. USE DESIGN-POINT THROAT AREA
+# ================================================================
+#
+# Since 3 kN is the maximum design point,
+# use its throat area as the physical engine throat.
+#
+# ================================================================
+
+At = At_from_thrust
+
+Dt = math.sqrt(
+    4.0 * At / math.pi
+)
+
+Ae = (
+    EXPANSION_RATIO
+    *
+    At
+)
+
+De = math.sqrt(
+    4.0 * Ae / math.pi
+)
+
+
+print("\n================================================")
+print("FINAL NOZZLE GEOMETRY")
+print("================================================")
+
+print(
+    f"Throat area         = "
+    f"{At:.8e} m^2"
+)
+
+print(
+    f"Throat diameter     = "
+    f"{Dt*1000:.3f} mm"
+)
+
+print(
+    f"Exit area           = "
+    f"{Ae:.8e} m^2"
+)
+
+print(
+    f"Exit diameter       = "
+    f"{De*1000:.3f} mm"
+)
+
+
+# ================================================================
+# 14. SPLIT 3-kN DESIGN MASS FLOW
+# ================================================================
+
+mdot_ch4_design = (
+    MDOT_DESIGN
+    /
+    (1.0 + OF_DESIGN)
+)
+
+mdot_lox_design = (
+    OF_DESIGN
+    *
+    mdot_ch4_design
+)
+
+
+print("\n================================================")
+print("3 kN PROPELLANT FLOW")
+print("================================================")
+
+print(
+    f"Total mdot          = "
+    f"{MDOT_DESIGN:.5f} kg/s"
+)
+
+print(
+    f"CH4 mdot            = "
+    f"{mdot_ch4_design:.5f} kg/s"
+)
+
+print(
+    f"LOX mdot            = "
+    f"{mdot_lox_design:.5f} kg/s"
+)
+
+
+# ================================================================
+# 15. CALCULATE K VALUES
+# ================================================================
+
+K1 = (
+    V_GAS_TRACE
+    *
+    T_ANN_TRACE
+    /
+    (
+        V_LIQ_TRACE
+        *
+        L_OPEN_TRACE
+    )
+)
+
+K2 = (
+    MR_COLD_FLOW
+    *
+    RE_LIQ_TRACE
+    /
+    RE_GAS_TRACE
+)
+
+K3 = (
+    math.sqrt(
+        RHO_GAS_TRACE /
+        RHO_AIR_ATM
+    )
+    *
+    V_GAS_TRACE
+    *
+    T_ANN_TRACE
+    /
+    (
+        math.sqrt(
+            RHO_LIQ_TRACE /
+            RHO_WATER
+        )
+        *
+        V_LIQ_TRACE
+        *
+        L_OPEN_TRACE
+    )
+)
+
+
+if K_METHOD == "K1":
+
+    K = K1
+
+elif K_METHOD == "K2":
+
+    K = K2
+
+elif K_METHOD == "K3":
+
+    K = K3
+
+else:
+
+    raise ValueError(
+        "K_METHOD must be K1, K2 or K3"
+    )
+
+
+print("\n================================================")
+print("K VALUES")
+print("================================================")
+
+print(f"K1                  = {K1:.6f}")
+print(f"K2                  = {K2:.6f}")
+print(f"K3                  = {K3:.6f}")
+print(f"Selected K          = {K:.6f}")
+
+
+# ================================================================
+# 16. PINTLE DIAMETER
+# ================================================================
+
+Dp = (
+    PINTLE_DIAMETER_MM
+    /
+    1000.0
+)
+
+theta_pt = math.radians(
+    PINTLE_ANGLE_DEG
+)
+
+
+# ================================================================
+# 17. FUNCTION FOR INJECTOR CALCULATIONS
+# ================================================================
+
+def injector_calculation(
+    thrust,
+    pc_bar,
+    mdot,
+    of_ratio
+):
+
+    # ------------------------------------------------------------
+    # Propellant mass flows
+    # ------------------------------------------------------------
+
+    mdot_ch4 = (
+        mdot
+        /
+        (1.0 + of_ratio)
+    )
+
+    mdot_lox = (
+        of_ratio
+        *
+        mdot_ch4
+    )
+
+    # ------------------------------------------------------------
+    # Injector pressure drops
+    # ------------------------------------------------------------
+
+    dP_lox = (
+        DP_LOX_FRACTION
+        *
+        pc_bar
+        *
+        1e5
+    )
+
+    dP_ch4 = (
+        DP_CH4_FRACTION
+        *
+        pc_bar
+        *
+        1e5
+    )
+
+    # ------------------------------------------------------------
+    # LOX injector velocity
+    # ------------------------------------------------------------
+
+    V_lox = (
+        CD_LOX
+        *
+        math.sqrt(
+            2.0
+            *
+            dP_lox
+            /
+            RHO_LOX
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Find methane annular gap
+    # ------------------------------------------------------------
+
+    gap = 0.0005
+
+    gap_increment = 0.00005
+
+    while True:
+
+        A_ann = (
+            math.pi
+            *
+            gap
+            *
+            (Dp + gap)
+        )
+
+        V_ch4 = (
+            mdot_ch4
+            /
+            (
+                RHO_CH4
+                *
+                A_ann
+            )
+        )
+
+        Mach_ch4 = (
+            V_ch4
+            /
+            A_CH4
+        )
+
+        if Mach_ch4 <= 0.95:
+
+            break
+
+        gap += gap_increment
+
+        if gap > 0.010:
+
+            raise RuntimeError(
+                "Methane gap calculation exceeded limit."
+            )
+
+    # ------------------------------------------------------------
+    # LOX flow area
+    # ------------------------------------------------------------
+
+    A_lox = (
+        mdot_lox
+        /
+        (
+            CD_LOX
+            *
+            math.sqrt(
+                2.0
+                *
+                RHO_LOX
+                *
+                dP_lox
+            )
+        )
+    )
+
+    # ------------------------------------------------------------
+    # SOURCE-SPECIFIC TMR
+    # ------------------------------------------------------------
+
+    numerator = (
+        mdot_lox
+        *
+        V_lox
+        *
+        math.cos(theta_pt)
+    )
+
+    denominator = (
+        mdot_ch4
+        *
+        V_ch4
+        +
+        mdot_lox
+        *
+        V_lox
+        *
+        math.sin(theta_pt)
+    )
+
+    TMR = (
+        numerator
+        /
+        denominator
+    )
+
+    # ------------------------------------------------------------
+    # BLOCKAGE FACTOR
+    # ------------------------------------------------------------
+
+    slot_width = (
+        BLOCKAGE_FACTOR
+        *
+        math.pi
+        *
+        Dp
+        /
+        N_SLOTS
+    )
+
+    BF = (
+        N_SLOTS
+        *
+        slot_width
+        /
+        (
+            math.pi
+            *
+            Dp
+        )
+    )
+
+    # ------------------------------------------------------------
+    # EFFECTIVE MOMENTUM RATIO
+    # ------------------------------------------------------------
+
+    EMR = (
+        TMR
+        /
+        BF
+    )
+
+    # ------------------------------------------------------------
+    # SPRAY HALF ANGLE
+    # ------------------------------------------------------------
+
+    acos_argument = (
+        1.0
+        /
+        (1.0 + TMR)
+    )
+
+    acos_argument = max(
+        -1.0,
+        min(
+            1.0,
+            acos_argument
+        )
+    )
+
+    spray_half_angle = math.degrees(
+        math.acos(
+            acos_argument
+        )
+    )
+
+    spray_full_angle = (
+        2.0
+        *
+        spray_half_angle
+    )
+
+    # ------------------------------------------------------------
+    # TRACING OPENING DISTANCE
+    # ------------------------------------------------------------
+
+    Ltod = (
+        (mdot_lox / mdot_ch4)
+        *
+        K
+        *
+        (
+            T_TAG
+            /
+            (
+                RHO_LIQ_TRACE
+                *
+                At
+                *
+                R_GAS_TRACE
+                *
+                T_GAS_TRACE
+            )
+        )
+        *
+        (
+            MU_LIQ_TRACE
+            /
+            MU_GAS_TRACE
+        )
+        *
+        T_TRACE
+    )
+
+    return {
+
+        "thrust": thrust,
+        "Pc_bar": pc_bar,
+
+        "mdot": mdot,
+        "mdot_lox": mdot_lox,
+        "mdot_ch4": mdot_ch4,
+
+        "dP_lox_bar":
+            dP_lox / 1e5,
+
+        "dP_ch4_bar":
+            dP_ch4 / 1e5,
+
+        "V_lox":
+            V_lox,
+
+        "V_ch4":
+            V_ch4,
+
+        "Mach_ch4":
+            Mach_ch4,
+
+        "annular_gap_mm":
+            gap * 1000.0,
+
+        "A_ann_mm2":
+            A_ann * 1e6,
+
+        "A_lox_mm2":
+            A_lox * 1e6,
+
+        "TMR":
+            TMR,
+
+        "BF":
+            BF,
+
+        "EMR":
+            EMR,
+
+        "spray_half_angle_deg":
+            spray_half_angle,
+
+        "spray_full_angle_deg":
+            spray_full_angle,
+
+        "slot_width_mm":
+            slot_width * 1000.0,
+
+        "Ltod_mm":
+            Ltod * 1000.0
+    }
+
+
+# ================================================================
+# 18. CALCULATE LOWER THRUST POINTS
+# ================================================================
+#
+# IMPORTANT:
+#
+# The 3-kN point is fixed:
+#
+#   Pc = 24 bar
+#   mdot = 1.17 kg/s
+#
+# For the lower points, we scale the mass flow approximately
+# with thrust as an INITIAL operating-point estimate.
+#
+# ================================================================
+
+mdot_1kN = (
+    MDOT_DESIGN
+    *
+    F_MIN
+    /
+    F_MAX
+)
+
+mdot_2kN = (
+    MDOT_DESIGN
+    *
+    F_MID
+    /
+    F_MAX
+)
+
+
+# Preliminary chamber pressures
+#
+# At fixed throat and approximately constant C*:
+#
+# Pc proportional to mdot
+
+pc_1kN = (
+    PC_DESIGN_BAR
+    *
+    mdot_1kN
+    /
+    MDOT_DESIGN
+)
+
+pc_2kN = (
+    PC_DESIGN_BAR
+    *
+    mdot_2kN
+    /
+    MDOT_DESIGN
+)
+
+
+# ================================================================
+# 19. OPERATING POINTS
+# ================================================================
+
+operating_points = [
+
+    injector_calculation(
+        F_MIN,
+        pc_1kN,
+        mdot_1kN,
+        OF_DESIGN
+    ),
+
+    injector_calculation(
+        F_MID,
+        pc_2kN,
+        mdot_2kN,
+        OF_DESIGN
+    ),
+
+    injector_calculation(
+        F_MAX,
+        PC_DESIGN_BAR,
+        MDOT_DESIGN,
+        OF_DESIGN
+    )
+
+]
+
+
+# ================================================================
+# 20. PRINT FINAL RESULTS
+# ================================================================
+
+print("\n================================================")
+print("PINTLE INJECTOR RESULTS")
+print("================================================")
+
+print(
+    f"Pintle diameter    = "
+    f"{PINTLE_DIAMETER_MM:.3f} mm"
+)
+
+print(
+    f"Pintle tip angle   = "
+    f"{PINTLE_ANGLE_DEG:.2f} deg"
+)
+
+print(
+    f"Number of slots    = "
+    f"{N_SLOTS}"
+)
+
+print(
+    f"Blockage factor    = "
+    f"{BLOCKAGE_FACTOR:.3f}"
+)
+
+
+for r in operating_points:
+
+    print("\n------------------------------------------------")
+
+    print(
+        f"THRUST = {r['thrust']:.0f} N"
+    )
+
+    print(
+        f"Pc                   = "
+        f"{r['Pc_bar']:.3f} bar"
+    )
+
+    print(
+        f"Total mdot           = "
+        f"{r['mdot']:.5f} kg/s"
+    )
+
+    print(
+        f"LOX mdot             = "
+        f"{r['mdot_lox']:.5f} kg/s"
+    )
+
+    print(
+        f"GCH4 mdot            = "
+        f"{r['mdot_ch4']:.5f} kg/s"
+    )
+
+    print(
+        f"LOX velocity         = "
+        f"{r['V_lox']:.2f} m/s"
+    )
+
+    print(
+        f"GCH4 velocity        = "
+        f"{r['V_ch4']:.2f} m/s"
+    )
+
+    print(
+        f"GCH4 Mach            = "
+        f"{r['Mach_ch4']:.3f}"
+    )
+
+    print(
+        f"Annular gap          = "
+        f"{r['annular_gap_mm']:.3f} mm"
+    )
+
+    print(
+        f"TMR                  = "
+        f"{r['TMR']:.4f}"
+    )
+
+    print(
+        f"BF                   = "
+        f"{r['BF']:.4f}"
+    )
+
+    print(
+        f"EMR                  = "
+        f"{r['EMR']:.4f}"
+    )
+
+    print(
+        f"Spray half-angle     = "
+        f"{r['spray_half_angle_deg']:.2f} deg"
+    )
+
+    print(
+        f"Full spray angle     = "
+        f"{r['spray_full_angle_deg']:.2f} deg"
+    )
+
+    print(
+        f"Slot width           = "
+        f"{r['slot_width_mm']:.3f} mm"
+    )
+
+    print(
+        f"L_tod                = "
+        f"{r['Ltod_mm']:.3f} mm"
+    )
+
+
+# ================================================================
+# 21. SAVE CSV
+# ================================================================
+
+csv_filename = "pintle_design_results.csv"
+
+fieldnames = list(
+    operating_points[0].keys()
+)
+
+with open(
+    csv_filename,
+    "w",
+    newline=""
+) as file:
+
+    writer = csv.DictWriter(
+        file,
+        fieldnames=fieldnames
+    )
+
+    writer.writeheader()
+
+    writer.writerows(
+        operating_points
+    )
+
+
+print("\n================================================")
+print("CALCULATION COMPLETE")
+print("================================================")
+
+print(
+    f"Results saved to: {csv_filename}"
+)
